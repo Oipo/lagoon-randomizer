@@ -84,6 +84,34 @@ inline uint32_t crc32_ieee(const std::vector<char>& data) {
 // CRC32 of "Lagoon (USA)" with any copier header removed.
 inline constexpr uint32_t LAGOON_USA_CRC32 = 0xD2554270u;
 
+// Recomputes the SNES internal checksum/complement (LoROM: $7FDC-$7FDF) so the
+// header stays self-consistent after we patch ROM bytes. The complement and
+// checksum words always sum to $01FE (each byte + its complement = $FF), so we
+// neutralize those four bytes to that fixed contribution, sum every byte, then
+// store checksum = sum & $FFFF and complement = checksum ^ $FFFF. Assumes a
+// power-of-two image summed whole (true for Lagoon's 1 MiB).
+inline void fix_header_checksum(std::vector<char>& bytes) {
+    constexpr size_t complement_lo = 0x7FDC;
+    constexpr size_t checksum_lo = 0x7FDE;
+    if(bytes.size() < checksum_lo + 2) {
+        return;
+    }
+    uint32_t sum = 0;
+    for(char c : bytes) {
+        sum += static_cast<unsigned char>(c);
+    }
+    for(size_t off = complement_lo; off < complement_lo + 4; ++off) {
+        sum -= static_cast<unsigned char>(bytes[off]);
+    }
+    sum += 0x01FEu;  // canonical contribution of complement=$FFFF + checksum=$0000
+    const uint16_t checksum = static_cast<uint16_t>(sum & 0xFFFFu);
+    const uint16_t complement = static_cast<uint16_t>(checksum ^ 0xFFFFu);
+    bytes[complement_lo] = static_cast<char>(complement & 0xFF);
+    bytes[complement_lo + 1] = static_cast<char>((complement >> 8) & 0xFF);
+    bytes[checksum_lo] = static_cast<char>(checksum & 0xFF);
+    bytes[checksum_lo + 1] = static_cast<char>((checksum >> 8) & 0xFF);
+}
+
 // Applies the randomizer to a raw ROM image and returns the patched bytes.
 // This is the single source of truth shared by the native CLI and the web
 // (Emscripten) build, so both produce identical output for identical input.
@@ -228,6 +256,9 @@ inline RandomizerResult randomize_rom(std::vector<char> bytes, const RandomizerO
         std::random_device dev;
         rng.seed(dev());
     }
+
+    // Keep the SNES header checksum valid after the byte patches above.
+    fix_header_checksum(bytes);
 
     result.success = true;
     result.data = std::move(bytes);
