@@ -1,0 +1,64 @@
+# Example nginx config for serving the Lagoon Randomizer static bundle.
+# Goal: a plain refresh always picks up newly-deployed files. The asset names are
+# stable, so we revalidate (ETag/304) rather than cache-bust by filename.
+#
+# Put this inside your server { } block and point `alias` at wherever you copied
+# the contents of build-wasm/ (index.html, lagoon-randomizer.js/.wasm, version.json).
+
+location /lagoon/ {
+    # Point at where the files actually live. If they are under this server's
+    # `root` (e.g. root is /var/www/html/site and files are at .../site/lagoon/),
+    # you can DROP the alias entirely and the location serves from root + /lagoon/.
+    # If you keep an alias, make sure the path matches root + /lagoon/ — a mismatch
+    # (e.g. root .../html/site but alias .../site/lagoon/) is a silent 404.
+    alias /var/www/html/volt-software.nl/lagoon/;
+    index index.html;
+
+    # Always fetch fresh. We use "no-store" (not "no-cache") on purpose: "no-cache"
+    # makes the browser REVALIDATE, and nginx answers an unchanged file with a 304
+    # that carries no Content-Type. Firefox's WebAssembly.instantiateStreaming then
+    # rejects the .wasm ("unsupported MIME type ... expected application/wasm") on a
+    # normal reload, even though mime.types is correct and a hard reload works.
+    # "no-store" skips the cache entirely -> always a full 200 with Content-Type ->
+    # streaming compile works. Cost: the ~330 KB wasm re-downloads each visit.
+    add_header Cache-Control "no-store";
+
+    # GOTCHA: add_header is inherited ONLY if the child level defines no add_header
+    # of its own. The line above therefore DROPS any server-level security headers
+    # (HSTS, X-Content-Type-Options, X-Frame-Options, ...) for /lagoon/. If your
+    # server { } block sets such headers, repeat them here, e.g.:
+    #   add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload";
+    #   add_header X-Content-Type-Options "nosniff";
+    #   add_header X-Frame-Options "DENY";
+}
+
+# Notes
+# -----
+# * This makes a refresh (or reopen) always serve the latest files. The in-page
+#   "new version available" banner additionally covers tabs left open across a
+#   deploy (it polls /lagoon/version.json).
+# * version.json is fetched from JS with a cache-busting query string and
+#   `cache: no-store`, so it is always read fresh regardless of these headers.
+# * WASM MIME: the browser stream-compiles .wasm only when it is served as
+#   application/wasm (required by spec, independent of nosniff). Verify with
+#       grep wasm /etc/nginx/mime.types
+#   If it is missing, add `application/wasm  wasm;` to the existing types {} block
+#   in /etc/nginx/mime.types. On Debian/Ubuntu unmapped extensions fall back to
+#   `default_type application/octet-stream`, which makes instantiateStreaming fail
+#   with: "Response has unsupported MIME type 'application/octet-stream'".
+#   Do NOT add a `types {}` block inside this location — that REPLACES the whole
+#   MIME map and would make index.html be served as octet-stream. (Wrong MIME is
+#   non-fatal: emscripten falls back to a slower non-streaming compile + a warning.)
+# * Why not "no-cache": with "no-cache" a normal reload revalidates and nginx
+#   returns 304 (no Content-Type); Firefox's instantiateStreaming then rejects the
+#   .wasm even though the server and mime.types are correct. "no-store" avoids the
+#   304 entirely. (A one-time Ctrl+Shift+R also works, but only until the next
+#   normal reload.) Symptom of getting this wrong: works on Ctrl+Shift+R, warns on
+#   Ctrl+R.
+# * Already on HTTPS, so nothing extra needed there.
+# * Bandwidth-optimal alternative: switch to hashed asset filenames served with
+#   `Cache-Control: public, max-age=31536000, immutable`, keeping only index.html +
+#   version.json on `no-cache`. `immutable` assets are served from cache with NO
+#   revalidation (no 304), so streaming compile works AND the ~330 KB wasm is not
+#   re-downloaded every visit; a new deploy changes the hash so refreshes still
+#   pick up new code.

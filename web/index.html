@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lagoon Randomizer</title>
+<style>
+    :root { color-scheme: dark; }
+    body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        background: #16181d;
+        color: #e6e6e6;
+        line-height: 1.5;
+    }
+    h1 { margin-bottom: 0.25rem; }
+    p.sub { margin-top: 0; color: #9aa0a6; }
+    fieldset { border: 1px solid #333; border-radius: 8px; margin: 1rem 0; }
+    legend { padding: 0 0.4rem; color: #9aa0a6; }
+    label { display: block; margin: 0.4rem 0; }
+    .row { display: flex; align-items: center; gap: 0.5rem; }
+    input[type="number"] { width: 8rem; }
+    button {
+        font-size: 1rem;
+        padding: 0.6rem 1.2rem;
+        border: 0;
+        border-radius: 8px;
+        background: #3b82f6;
+        color: white;
+        cursor: pointer;
+    }
+    button:disabled { background: #444; cursor: not-allowed; }
+    #status { margin-top: 1rem; min-height: 1.5rem; }
+    .error { color: #f87171; }
+    .ok { color: #4ade80; }
+    code { background: #222; padding: 0.1rem 0.3rem; border-radius: 4px; }
+    #update-banner {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+        background: #3b82f6; color: #fff; padding: 0.6rem 1rem; text-align: center;
+    }
+    #update-banner button {
+        margin-left: 0.5rem; padding: 0.3rem 0.8rem; font-size: 0.9rem;
+        border: 0; border-radius: 6px; background: #fff; color: #1d4ed8;
+        font-weight: bold; cursor: pointer;
+    }
+</style>
+</head>
+<body>
+    <h1>Lagoon Randomizer</h1>
+    <p class="sub">Find the source code on <a href="https://github.com/Oipo/lagoon-randomizer">github</a>.</p>
+
+    <fieldset>
+        <legend>ROM</legend>
+        <label>Select your Lagoon (USA) ROM:
+            <input type="file" id="rom" accept=".sfc,.smc,.bin">
+        </label>
+    </fieldset>
+
+    <fieldset>
+        <legend>Options</legend>
+        <label class="row">
+            Town walk speed:
+            <select id="walkSpeed">
+                <option value="3" selected>Default</option>
+                <option value="4">33% faster</option>
+                <option value="5">66% faster</option>
+                <option value="6">100% faster</option>
+            </select>
+        </label>
+        <label class="row">
+            Seed (optional):
+            <input type="number" id="seed" placeholder="random" min="0">
+        </label>
+    </fieldset>
+
+    <button id="go" disabled>Loading…</button>
+    <div id="status"></div>
+
+    <!-- MODULARIZE output: defines the global factory createLagoonRandomizer() -->
+    <script src="lagoon-randomizer.js"></script>
+    <script>
+    (function () {
+        const fileInput = document.getElementById('rom');
+        const goBtn = document.getElementById('go');
+        const statusEl = document.getElementById('status');
+        let wasm = null;
+
+        function setStatus(msg, cls) {
+            statusEl.textContent = msg;
+            statusEl.className = cls || '';
+        }
+
+        createLagoonRandomizer().then(function (Module) {
+            wasm = Module;
+            goBtn.textContent = 'Randomize';
+            goBtn.disabled = false;
+        }).catch(function (e) {
+            setStatus('Failed to load WASM module: ' + e, 'error');
+        });
+
+        // --- "new version available" notice --------------------------------
+        // APP_VERSION is a content hash stamped in by build-wasm.sh. version.json
+        // (written next to the files) carries the version currently on the server;
+        // if it differs from this loaded page, a newer build has been deployed.
+        const APP_VERSION = '__APP_VERSION__';
+
+        function showUpdateBanner() {
+            if (document.getElementById('update-banner')) return;
+            const bar = document.createElement('div');
+            bar.id = 'update-banner';
+            bar.innerHTML = 'A new version is available. <button id="reloadBtn">Reload</button>';
+            document.body.appendChild(bar);
+            document.getElementById('reloadBtn').addEventListener('click', function () {
+                location.reload();
+            });
+        }
+
+        async function checkForUpdate() {
+            if (APP_VERSION.charAt(0) === '_') return;  // unstamped (raw source) — skip
+            try {
+                const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+                if (!r.ok) return;
+                const latest = (await r.json()).version;
+                if (latest && latest !== APP_VERSION) showUpdateBanner();
+            } catch (e) { /* offline or no version.json — ignore */ }
+        }
+
+        checkForUpdate();
+        setInterval(checkForUpdate, 5 * 60 * 1000);
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) checkForUpdate();
+        });
+
+        function buildOptions() {
+            const opts = {
+                walkSpeed: parseInt(document.getElementById('walkSpeed').value, 10),
+            };
+            // Always resolve to a concrete 32-bit seed (mt19937 is seeded with a
+            // uint32), so even "random" runs are reproducible and can be shown.
+            const seed = document.getElementById('seed').value;
+            opts.seed = (seed !== '') ? (parseInt(seed, 10) >>> 0)
+                                      : crypto.getRandomValues(new Uint32Array(1))[0];
+            return opts;
+        }
+
+        function download(bytes, name) {
+            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        }
+
+        goBtn.addEventListener('click', function () {
+            const file = fileInput.files[0];
+            if (!file) { setStatus('Please choose a ROM file first.', 'error'); return; }
+            if (!wasm) { setStatus('Module still loading…', 'error'); return; }
+
+            setStatus('Randomizing…');
+            const reader = new FileReader();
+            reader.onload = function () {
+                try {
+                    const input = new Uint8Array(reader.result);
+                    const opts = buildOptions();
+                    const result = wasm.randomizeRom(input, opts);
+                    if (!result.success) {
+                        setStatus('Error: ' + result.error, 'error');
+                        return;
+                    }
+                    const base = file.name.replace(/\.[^.]+$/, '');
+                    const name = base + '.randomized.seed-' + opts.seed + '.sfc';
+                    download(result.data, name);
+                    setStatus('Done! Downloaded ' + name, 'ok');
+                } catch (e) {
+                    setStatus('Error: ' + e, 'error');
+                }
+            };
+            reader.onerror = function () { setStatus('Could not read the file.', 'error'); };
+            reader.readAsArrayBuffer(file);
+        });
+    })();
+    </script>
+</body>
+</html>
