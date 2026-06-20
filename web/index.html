@@ -75,6 +75,19 @@
         </label>
     </fieldset>
 
+    <fieldset>
+        <legend>Sword reach (pixels per facing direction, 1–128)</legend>
+        <p class="sub">How far the melee hitbox extends in front of the player. Vanilla: 28 / 17 / 28 / 17.</p>
+        <label class="row">Right:
+            <input type="number" id="swordReachRight" min="1" max="128" value="28"></label>
+        <label class="row">Down:
+            <input type="number" id="swordReachDown" min="1" max="128" value="17"></label>
+        <label class="row">Left:
+            <input type="number" id="swordReachLeft" min="1" max="128" value="28"></label>
+        <label class="row">Up:
+            <input type="number" id="swordReachUp" min="1" max="128" value="17"></label>
+    </fieldset>
+
     <button id="go" disabled>Loading…</button>
     <div id="status"></div>
 
@@ -137,6 +150,13 @@
             const opts = {
                 walkSpeed: parseInt(document.getElementById('walkSpeed').value, 10),
             };
+            // Sword reach per direction. Only forward fields that parse to a finite
+            // number; a blank field falls back to the vanilla default in C++. Any
+            // out-of-range value is rejected there (1..128) and surfaced as an error.
+            ['swordReachRight', 'swordReachDown', 'swordReachLeft', 'swordReachUp'].forEach(function (id) {
+                const v = parseInt(document.getElementById(id).value, 10);
+                if (Number.isFinite(v)) opts[id] = v;
+            });
             // Always resolve to a concrete 32-bit seed (mt19937 is seeded with a
             // uint32), so even "random" runs are reproducible and can be shown.
             const seed = document.getElementById('seed').value;

@@ -37,11 +37,11 @@ struct SNES_addr {
     uint8_t bank;
     uint16_t addr;
 
-    [[nodiscard]] PC_addr toPc() const {
+    [[nodiscard]] constexpr PC_addr toPc() const {
     return (static_cast<PC_addr>(bank & 0x7F) * 0x8000u) + (addr & 0x7FFFu);
     }
 
-    void fromPc(PC_addr pc) {
+    constexpr void fromPc(PC_addr pc) {
         bank = static_cast<uint8_t>(((pc / 0x8000u) & 0x7F) | 0x80);
         addr = static_cast<uint16_t>((pc % 0x8000u) | 0x8000u);
     }
@@ -59,6 +59,17 @@ struct RandomizerOptions {
     // table entries (see reverse-engineering-docs/town-movement.md).
     // 3 = vanilla; 4/5/6 are ~33%/66%/100% faster. Clamped to [1, 15].
     uint8_t walk_speed{3};
+
+    // Melee (sword) reach in pixels per facing direction: how far the attack
+    // hitbox extends from the player toward where they're facing. These rewrite
+    // the far-edge offset of the per-direction box table at $01:B6F0 (rows 0-3,
+    // the only rows the player's $050A pose index ever selects). Vanilla reach is
+    // right/left = 28, down/up = 17. Each must be in [1, 128]; randomize_rom
+    // rejects out-of-range values. See reverse-engineering-docs/sword-attack.md.
+    uint8_t sword_reach_right{28};
+    uint8_t sword_reach_down{17};
+    uint8_t sword_reach_left{28};
+    uint8_t sword_reach_up{17};
 };
 
 struct RandomizerResult {
@@ -240,14 +251,35 @@ inline RandomizerResult randomize_rom(std::vector<char> bytes, const RandomizerO
     // (Confirmed by runtime: $0506 reads -3 = FD FF when holding left.)
     // See reverse-engineering-docs/town-movement.md.
     const int16_t v = std::clamp<int>(options.walk_speed, 1, 15);
-    auto put_velocity = [&](uint32_t offset, int16_t value) {
+    auto put_i16le = [&](uint32_t offset, int16_t value) {
         bytes[offset] = static_cast<char>(value & 0xFF);
         bytes[offset + 1] = static_cast<char>((value >> 8) & 0xFF);
     };
-    put_velocity(0x010149, +v);  // tier 2, right  (+X)
-    put_velocity(0x01014F, +v);  // tier 2, down   (+Y)
-    put_velocity(0x010151, -v);  // tier 2, left   (-X)
-    put_velocity(0x010157, -v);  // tier 2, up     (-Y)
+    put_i16le(0x010149, +v);  // tier 2, right  (+X)
+    put_i16le(0x01014F, +v);  // tier 2, down   (+Y)
+    put_i16le(0x010151, -v);  // tier 2, left   (-X)
+    put_i16le(0x010157, -v);  // tier 2, up     (-Y)
+
+    // Configurable sword (melee) reach. The player's attack hitbox builder
+    // $01:B6BD reads the facing index $050A (only ever 0-3, confirmed via the
+    // pose table $02:80DA) and adds four signed 16-bit offsets from the table at
+    // $01:B6F0 to the player position to form the hitbox [$40,$42]x[$44,$46].
+    // The near edge of each box sits exactly on the player (offset 0), so the
+    // far-edge offset == the reach. We rewrite only that far edge per direction:
+    // right/down use +reach, left/up use -reach. The default values reproduce the
+    // vanilla bytes exactly. See reverse-engineering-docs/sword-attack.md.
+    auto reach_in_range = [](uint8_t r) { return r >= 1 && r <= 128; };
+    if(!reach_in_range(options.sword_reach_right) ||
+       !reach_in_range(options.sword_reach_down) ||
+       !reach_in_range(options.sword_reach_left) ||
+       !reach_in_range(options.sword_reach_up)) {
+        result.error = "Sword reach values must each be in the range 1..128.";
+        return result;
+    }
+    put_i16le(0x00B6F2, +static_cast<int16_t>(options.sword_reach_right)); // row 0 right: dx1
+    put_i16le(0x00B6FE, +static_cast<int16_t>(options.sword_reach_down));  // row 1 down:  dy1
+    put_i16le(0x00B700, -static_cast<int16_t>(options.sword_reach_left));  // row 2 left:  dx0
+    put_i16le(0x00B70C, -static_cast<int16_t>(options.sword_reach_up));    // row 3 up:    dy0
 
     std::mt19937 rng;
     if(options.use_seed) {

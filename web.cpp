@@ -55,6 +55,28 @@ val randomize(val input, val opts) {
     set_optional_uint32(walk_speed, opts, "walkSpeed");
     options.walk_speed = static_cast<uint8_t>(walk_speed);
 
+    // Sword reach per facing direction (right, down, left, up). Read as uint32 and
+    // range-check before narrowing to uint8_t so an out-of-range value can't wrap
+    // into the valid band; randomize_rom enforces the same [1,128] range too.
+    uint32_t sword[4] = {options.sword_reach_right, options.sword_reach_down,
+                         options.sword_reach_left, options.sword_reach_up};
+    set_optional_uint32(sword[0], opts, "swordReachRight");
+    set_optional_uint32(sword[1], opts, "swordReachDown");
+    set_optional_uint32(sword[2], opts, "swordReachLeft");
+    set_optional_uint32(sword[3], opts, "swordReachUp");
+    for(uint32_t r : sword) {
+        if(r < 1 || r > 128) {
+            val ret = val::object();
+            ret.set("success", false);
+            ret.set("error", "Sword reach values must each be in the range 1..128.");
+            return ret;
+        }
+    }
+    options.sword_reach_right = static_cast<uint8_t>(sword[0]);
+    options.sword_reach_down  = static_cast<uint8_t>(sword[1]);
+    options.sword_reach_left  = static_cast<uint8_t>(sword[2]);
+    options.sword_reach_up    = static_cast<uint8_t>(sword[3]);
+
     std::vector<uint8_t> in = convertJSArrayToNumberVector<uint8_t>(input);
     std::vector<char> bytes(in.begin(), in.end());
 
