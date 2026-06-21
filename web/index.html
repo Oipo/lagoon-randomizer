@@ -70,6 +70,14 @@
             </select>
         </label>
         <label class="row">
+            <input type="checkbox" id="fade">
+            Faster menu fade (3x quicker fade-to-black)
+        </label>
+        <label class="row">
+            <input type="checkbox" id="fastRom">
+            FastROM (experimental: run from the fast $80 mirror)
+        </label>
+        <label class="row">
             Seed (optional):
             <input type="number" id="seed" placeholder="random" min="0">
         </label>
@@ -149,6 +157,8 @@
         function buildOptions() {
             const opts = {
                 walkSpeed: parseInt(document.getElementById('walkSpeed').value, 10),
+                fade: document.getElementById('fade').checked,
+                fastRom: document.getElementById('fastRom').checked,
             };
             // Sword reach per direction. Only forward fields that parse to a finite
             // number; a blank field falls back to the vanilla default in C++. Any

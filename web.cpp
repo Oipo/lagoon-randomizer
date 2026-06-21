@@ -77,6 +77,9 @@ val randomize(val input, val opts) {
     options.sword_reach_left  = static_cast<uint8_t>(sword[2]);
     options.sword_reach_up    = static_cast<uint8_t>(sword[3]);
 
+    options.fade = get_bool(opts, "fade", options.fade);
+    options.fast_rom = get_bool(opts, "fastRom", options.fast_rom);
+
     std::vector<uint8_t> in = convertJSArrayToNumberVector<uint8_t>(input);
     std::vector<char> bytes(in.begin(), in.end());
 
