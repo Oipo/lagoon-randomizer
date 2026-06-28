@@ -86,7 +86,9 @@ need its own `LDX` inserted.)
 ## HP/MP modification routines — bank $01
 
 `$0520`/`$0522` are the *canonical* current HP/MP (not a display shadow):
-- `$01:91EA` add-to-HP, `$01:9226` subtract-from-HP (delta in `$1011`).
+- `$01:91EA` add-to-HP, `$01:9226` subtract-from-HP (delta in `$1011`). Data
+  Crystal independently labels `$1011` "Qty HP healed while resting" — confirming
+  it as the heal/damage delta (see [ram-map.md](ram-map.md)).
 - `$01:940D` add-to-MP, `$01:9449` subtract-from-MP.
 - These are indexed by `,X` (per character/party slot) and clamp current HP/MP
   to max by `LDA $052C` (level) → `LDA $E140,Y`/`$E164,Y` (the per-level table).
@@ -125,11 +127,14 @@ Hypotheses are marked `(?)` — not yet confirmed.
   Sits between Experience (`$052A`) and Level (`$052C`); earlier mislabeled "max MP".
 - **`$0530` / `$0532`** — index into the class/equipment bonus tables during the
   level-up recompute (`$0530*2` → `$E188`/`$E194`; `$0532*2` → `$E1A0`). Meaning
-  (character vs. class vs. equipped-gear slot) (?) unconfirmed.
+  (character vs. class vs. equipped-gear slot) (?) unconfirmed. **Corroboration:**
+  Data Crystal's RAM map labels `$0530` "selected weapon" (see
+  [ram-map.md](ram-map.md)), which supports the equipped-gear reading.
 - **`$0531` / `$0533`** — condition bytes checked in the recompute. `$0533==2`
   adds `+30` (`#$001E`) to Strength at `$01:9515`; `$0533==1` triggers another
   Defense bonus at `$01:9560`. Likely equipped-weapon/armor type (?).
-- **`$0536`** — set to `$FFFF` by the new-game init; purpose TBD.
+- **`$0536`** — set to `$FFFF` by the new-game init; purpose TBD. Data Crystal's
+  RAM map reads it as "selected item" ([ram-map.md](ram-map.md)).
 - **`$0370` / `$0371`** — cached max HP / max MP (recomputed from level at
   `$01:9580`). Confirmed as a cache, but also reused as scratch elsewhere
   (e.g. the exp-gain amount in the level-up routine `$01:94B2`).

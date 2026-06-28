@@ -16,6 +16,11 @@
 Confirmed at runtime (Mesen): walking left/right changes `$0502`, up/down changes
 `$0504`, and `$0506` holds the X-velocity (e.g. `FD FF` = −3 when holding left).
 
+> Data Crystal's RAM map lists `$0502`/`$0504` as 1-byte "Horizontal/Vertical
+> Coord" — same addresses, but they document only the low byte. The runtime
+> evidence above (and the integrator) confirm both are **16-bit**. See
+> [ram-map.md](ram-map.md).
+
 ## Movement model — `position += velocity`
 
 Per frame: `$0502 += $0506`, `$0504 += $0508` (integrator `$01:A4EB`). The velocity
