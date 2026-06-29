@@ -212,6 +212,66 @@ so idle objects skip phases 3/5 — no risky global Direct-Page rewrite required
 Before optimizing, profile in Mesen2: PC histogram with 2 vs 6 live objects, diff,
 and confirm the bodies (collision/multiply/OAM) dominate over the dispatch plumbing.
 
+### Would pointing DB at the fast mirror help? (≈0.1-0.2%, no)
+
+The FastROM patch fixes only the **program** bank (PBR → `$8x` mirror, so opcode and
+operand *fetches* are 6 mc). The **data bank (DB/DBR)** — which selects the bank for
+`abs` / `abs,X` / `abs,Y` *data* reads — is left at the slow bank. Setting DB to the
+fast mirror sounds like free speed, but for this loop it is almost nothing, and it is
+not safe to do blindly.
+
+**Why the gain is tiny — DB cannot speed WRAM.** The object struct `$0500,X` is WRAM.
+Under bank-`$01` code DB=`$01` resolves it to `$01:0500`; DB=`$81` resolves it to
+`$81:0500`. Both are the WRAM mirror at **8 mc — identical** (`$420D` and DB never
+touch WRAM speed). So the wall-to-wall `LDA/STA $05xx,X` accesses — the bulk of the
+loop — gain **zero**. DB only helps reads whose target is **ROM (`$8000+`)**: those
+drop 8 → 6 mc, i.e. **2 mc per byte**.
+
+**How few of those there are.** A static scan of the per-object path
+(`.agents/dbr_analysis.py`) finds ~20 savable ROM-data bytes on the main
+fall-through path vs ~160 RAM accesses, almost all of the savable ones being
+jump-table pointer fetches (`LDA $8198,Y` / `+1`). The only meaningful extra ROM
+reads are the per-cell offset tables in the OAM builders (`ADC $9DCE,Y` / `$9DD0,Y`,
+~3 cells × phases 3+5). Generously totalling:
+
+| Source | savable ROM bytes / object / frame |
+|--------|------------------------------------|
+| 6-8 dispatch pointer fetches            | ~12-16 |
+| small offset/velocity tables (`$C633`…) | ~4-8 |
+| OAM cell offset tables (phase 3 + 5)    | ~24-48 |
+| **total (generous)**                    | **~40-70 (cap ~80)** |
+
+At 2 mc/byte that is ~80-160 mc/object, so **~400-800 mc/frame for 5 objects against
+a ~357k mc frame ≈ 0.1-0.2%** (cap <0.3%). Imperceptible — because the loop is
+WRAM-bound and DB can't touch WRAM.
+
+**It isn't even free — DB currently encodes the table bank.** A blanket `DB=$81`
+would be a *correctness bug*, not just a no-op. Bank-`$01` code reads bank-`$01`
+tables, so its fast mirror is **`$81`**. But the bank-`$02` helpers in the call tree
+read **bank-`$02`** tables, so *their* fast mirror is **`$82`** — and they do **not**
+set their own DB (no `PHB`/`PHK`/`PLB` at entry; they inherit the caller's). Example,
+the velocity setter `$02:80EA`:
+
+```
+LDA $8129,Y / STA $0506,X     ; reads the velocity table at $02:8129 — REQUIRES DB=$02
+```
+
+If DB were `$81` when that runs, `$8129,Y` resolves to `$81:8129 = $01:8129` — the
+**wrong bank** → garbage velocity. A correct conversion therefore has to juggle DB
+per bank — `$81` while reading bank-`$01` tables, `$82` while reading bank-`$02`
+tables, restored at every boundary — matching what the engine already does
+implicitly by keeping DB = the current code bank. That is real audit + regression
+risk for a ~0.1% gain.
+
+**Verdict:** not worth it for this loop. DB-to-fast-mirror *is* a genuine win, but
+only for code that **streams large ROM data via absolute addressing** — a
+decompressor or the sound-sequence reader would be candidates. The per-object update
+loop is not one of them, and **neither are the graphics/animation loaders**: those
+turn out to be DMA, which is bank-explicit and fixed-rate (immune to both DB and
+FastROM) — see [graphics-loading.md](graphics-loading.md). A room/map-load
+decompressor (CPU, runs on transitions not per-frame) is the only remaining DB
+candidate, still unlocated.
+
 ## Open questions
 
 - Exact meaning of states 2/4/5 and the `$01:81BB`/`$051B` sub-state machine.
@@ -224,4 +284,8 @@ and confirm the bodies (collision/multiply/OAM) dominate over the dispatch plumb
 Disassembled with `.agents/lagoon_dis.py` (`dis`/`scan`) and `.agents/xref.py`,
 both CDL-aware (`l.cdl` M/X flags). Main loop found by scanning the slot-advance
 idiom `ADC #$0040` (`69 40 00`) + `CPX #$0840` (`E0 40 08`); dispatch tables dumped
-as 16-bit word arrays from each `JMP ($26)` site.
+as 16-bit word arrays from each `JMP ($26)` site. The DB/DBR estimate uses
+`.agents/dbr_analysis.py`, which decodes each per-object routine's fall-through path
+and tallies absolute data reads whose target is ROM (`$8000+`, DB-savable) vs
+RAM/registers (`<$8000`, fixed 8 mc) — run it from `.agents/` so it can
+`import lagoon_dis`.

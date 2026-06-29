@@ -56,8 +56,9 @@ struct RandomizerOptions {
     bool use_seed{};
     uint64_t seed{};
 
-    // Town walk speed in pixels per frame. Replaces the player's tier-2 velocity
-    // table entries (see reverse-engineering-docs/town-movement.md).
+    // Town walk speed in pixels per frame. Sets the player's dedicated speed tier
+    // (a relocated tier 7) so only the player is affected, not monsters that share
+    // a vanilla tier (see reverse-engineering-docs/town-movement.md).
     // 3 = vanilla; 4/5/6 are ~33%/66%/100% faster. Clamped to [1, 15].
     uint8_t walk_speed{3};
 
@@ -79,6 +80,17 @@ struct RandomizerOptions {
     // ramp). Not configurable -- it's vanilla (off) or fast (on).
     // See reverse-engineering-docs/screen-fade.md.
     bool fade{};
+
+    // Improve the follower (Thor/Giles), via two paired hooks (monsters unaffected):
+    //  (1) bump its walk speed from the vanilla tier 0 (+/-1 px/frame) to tier 2
+    //      (+/-3) so it stops crawling behind the player -- gated at runtime to
+    //      slot 1 + the follow flag $7E:04E1; and
+    //  (2) widen its waypoint "arrived" threshold (16px -> 48px) so it recomputes
+    //      its direction ~3x sooner and stops overshooting/oscillating at
+    //      chokepoints (e.g. stairs) now that it walks faster -- a patch to the
+    //      follower-exclusive escort AI.
+    // See reverse-engineering-docs/town-movement.md.
+    bool fast_follower{};
 
     // Experimental: convert the LoROM image to LoROM+FastROM. Flags the header
     // map-mode byte Fast, installs a reset boot stub that enables $420D and runs
@@ -468,22 +480,148 @@ inline RandomizerResult randomize_rom(std::vector<char> bytes, const RandomizerO
         bytes[offset] = static_cast<char>(value);
     }
 
-    // Configurable town walk speed. The player (object 0) walks via the generic
-    // object velocity setter $02:80EA, which looks up a per-frame velocity from a
-    // speed-tier table at $02:8129 (16 bytes/tier: 4 directions x {Xvel.w,Yvel.w})
-    // and stores it to $0506/$0508. The player walks at tier 2 = +/-3 px/frame; we
-    // rewrite that tier's four nonzero 16-bit entries to +/- walk_speed.
-    // (Confirmed by runtime: $0506 reads -3 = FD FF when holding left.)
+    // Player-only town walk speed via a dedicated speed tier.
+    //
+    // The generic per-object velocity setter $02:80EA (dispatch command 19, issued
+    // for EVERY live object by the shared phase-1 AI handler $01:81A4) computes
+    // velocity = SPEED_TABLE[$051A*16 + $050B*4] and stores it to $0506/$0508. The
+    // vanilla table $02:8129 has 7 rows (tiers 0..6 = +/-1..7 px/frame). The player
+    // and any monster sharing a tier read the SAME row, so rewriting tier 2 in
+    // place (as before) also sped up every tier-2 monster.
+    //
+    // To make the speed player-only we add an 8th row (tier 7) without disturbing
+    // tiers 0..6: relocate the whole table into unused bank-$02 space ($02:E427 /
+    // file 0x016427, a 128-byte zero block untouched by every CDL), copy tiers 0..6
+    // verbatim, append tier 7 = +/-walk_speed, repoint the setter's four table
+    // reads to the new base, and switch the player's init tier ($02:D9DE) from 2 to
+    // 7. Monster tiers are baked into their spawn templates and never include 7, so
+    // no monster is affected. The setter runs with DBR=$02, so the table must live
+    // in bank $02; it is then read at the same speed as the vanilla table.
     // See reverse-engineering-docs/town-movement.md.
     const int16_t v = std::clamp<int>(options.walk_speed, 1, 15);
     auto put_i16le = [&](uint32_t offset, int16_t value) {
         bytes[offset] = static_cast<char>(value & 0xFF);
         bytes[offset + 1] = static_cast<char>((value >> 8) & 0xFF);
     };
-    put_i16le(0x010149, +v);  // tier 2, right  (+X)
-    put_i16le(0x01014F, +v);  // tier 2, down   (+Y)
-    put_i16le(0x010151, -v);  // tier 2, left   (-X)
-    put_i16le(0x010157, -v);  // tier 2, up     (-Y)
+
+    constexpr uint32_t kSpeedTableSrc = 0x010129;  // $02:8129, vanilla 7 rows x 16
+    constexpr uint32_t kSpeedTableDst = 0x016427;  // $02:E427, relocated 8 rows x 16
+    constexpr uint16_t kSpeedTableAddr = 0xE427;   // SNES addr the setter reads (DBR=$02)
+
+    // Copy tiers 0..6 verbatim so every monster keeps its exact vanilla speed.
+    for(uint32_t i = 0; i < 7 * 16; ++i) {
+        bytes[kSpeedTableDst + i] = bytes[kSpeedTableSrc + i];
+    }
+    // Tier 7 = the player's configurable speed. Each 16-byte row is 4 directions x
+    // {Xvel.w, Yvel.w}: right(+X) down(+Y) left(-X) up(-Y), other axis zero.
+    const uint32_t t7 = kSpeedTableDst + 7 * 16;
+    for(uint32_t i = 0; i < 16; ++i) {
+        bytes[t7 + i] = 0;
+    }
+    put_i16le(t7 + 0,  +v);  // dir 0 right: X = +v
+    put_i16le(t7 + 6,  +v);  // dir 1 down:  Y = +v
+    put_i16le(t7 + 8,  -v);  // dir 2 left:  X = -v
+    put_i16le(t7 + 14, -v);  // dir 3 up:    Y = -v
+
+    // Repoint the setter's four table reads ($02:8103/8109/810F/8115 =
+    // LDA $8129/$812A/$812B/$812C,Y) from base $8129 to the relocated base $E427.
+    put_i16le(0x010104, static_cast<int16_t>(kSpeedTableAddr + 0));  // Xvel lo
+    put_i16le(0x01010A, static_cast<int16_t>(kSpeedTableAddr + 1));  // Xvel hi
+    put_i16le(0x010110, static_cast<int16_t>(kSpeedTableAddr + 2));  // Yvel lo
+    put_i16le(0x010116, static_cast<int16_t>(kSpeedTableAddr + 3));  // Yvel hi
+
+    // Switch the player's init speed tier from 2 to 7. The init block at $02:D9D8
+    // (file 0x0159D8) sets level $052C=1, tier $051A (vanilla: A=1, INC -> 2), pose
+    // $050A=1 and dir $050B=$FF in 19 bytes. We rewrite it to store tier 7
+    // explicitly, keeping the starting-level immediate at its original offset
+    // (0x0159D9) and the block's total length (a trailing NOP pads the byte freed
+    // by dropping the INC and reusing A=1 for both level and pose).
+    //   Vanilla: A9 01 8D2C05 1A 8D1A05 A9 01 8D0A05 A9 FF 8D0B05
+    //   New    : A9 01 8D2C05 8D0A05 A9 07 8D1A05 A9 FF 8D0B05 EA
+    constexpr uint32_t kPlayerInit = 0x0159D8;
+    const uint8_t level_imm = static_cast<uint8_t>(bytes[kPlayerInit + 1]);
+    const uint8_t player_init[] = {
+        0xA9, 0x01,        // LDA #$01     (level immediate; restored below)
+        0x8D, 0x2C, 0x05,  // STA $052C    level = 1
+        0x8D, 0x0A, 0x05,  // STA $050A    pose  = 1 (reuses A=1)
+        0xA9, 0x07,        // LDA #$07
+        0x8D, 0x1A, 0x05,  // STA $051A    speed tier = 7  (was 2)
+        0xA9, 0xFF,        // LDA #$FF
+        0x8D, 0x0B, 0x05,  // STA $050B    dir = $FF
+        0xEA,              // NOP          pad to the original 19-byte length
+    };
+    static_assert(sizeof(player_init) == 19,
+                  "player init rewrite must match the original block length");
+    for(uint32_t i = 0; i < sizeof(player_init); ++i) {
+        bytes[kPlayerInit + i] = static_cast<char>(player_init[i]);
+    }
+    bytes[kPlayerInit + 1] = static_cast<char>(level_imm);  // preserve starting level
+
+    // --fast-follower, hook 1 of 2: speed up the follower (Thor/Giles) to tier 2
+    // (+/-3). The follower is object slot 1 (base $0540) and moves via the same
+    // setter, but its tier byte $055A is never written by any code, so it stays 0
+    // (= +/-1 px/frame, the slowest tier) and it crawls behind the player. The game
+    // reserves slot 1 for the follower whenever the follow flag $7E:04E1 is set
+    // (bit1=Thor, bit0=Giles; cf. the "follower present?" check $01:89BD).
+    //
+    // We use tier 2 (NOT the player's tier 7) deliberately: the follow AI is tuned
+    // for the vanilla player speed and overshoots / reverses direction at higher
+    // speeds. Tier 2 is shared with some monsters, but we only change which row the
+    // *follower* reads, not the row's contents, so no monster is affected.
+    //
+    // Nothing sets the follower's tier (no immediate to flip), so we hook the tier
+    // load in the setter so that, *only* for slot 1 while a follower is active, it
+    // reads tier 2 instead of the object's own $055A:
+    //
+    //   $02:80EF  LDA $051A,X  ->  JMP $F400   (3 bytes, in place)
+    //
+    // with a small trampoline in bank-$02 free space ($02:F400 / file 0x017400, a
+    // CDL-clean region). Gated at runtime to slot 1 + the follow flag (works for
+    // Thor and Giles); the JMPs are bank-relative and resolve to the same bytes
+    // whether the setter runs as $02 (SlowROM) or $82 (FastROM).
+    // See reverse-engineering-docs/town-movement.md.
+    if(options.fast_follower) {
+        constexpr uint16_t kFollowerTrampAddr = 0xF400;  // $02:F400
+        bytes[0x0100EF] = static_cast<char>(0x4C);                              // JMP
+        bytes[0x0100F0] = static_cast<char>(kFollowerTrampAddr & 0xFF);
+        bytes[0x0100F1] = static_cast<char>((kFollowerTrampAddr >> 8) & 0xFF);
+        const uint8_t follower_tramp[] = {
+            0xE0, 0x40, 0x00,  // CPX #$0040          follower slot 1?
+            0xD0, 0x0A,        // BNE own  (-> +0x0A)
+            0xAD, 0xE1, 0x04,  // LDA $04E1            follow flag (DBR=$02 -> WRAM $7E:04E1)
+            0xF0, 0x05,        // BEQ own  (-> +0x05)
+            0xA9, 0x02,        // LDA #$02             follower -> tier 2 (vanilla +/-3)
+            0x4C, 0xF2, 0x80,  // JMP $80F2            continue setter (ASL*4 ...)
+            0xBD, 0x1A, 0x05,  // own: LDA $051A,X     object's own tier (original load)
+            0x4C, 0xF2, 0x80,  // JMP $80F2
+        };
+        for(uint32_t i = 0; i < sizeof(follower_tramp); ++i) {
+            bytes[0x017400 + i] = static_cast<char>(follower_tramp[i]);
+        }
+    }
+
+    // --fast-follower, hook 2 of 2: make the follower re-pick its direction sooner
+    // so it stops oscillating at chokepoints (stairs).
+    //
+    // The follower follows a waypoint. Its escort AI (bank $02, $96xx/$97xx -- it
+    // runs only for the follower: it copies the player's direction bitmask $053F
+    // and toggles the follow flags $04E6/$04E1) walks toward waypoint $0579/$057B
+    // and only *recalculates* its direction once it gets within 16px of that
+    // waypoint -- sub-state 0 at $02:9689, the two `CMP #$0010` at $96B5 (dx) and
+    // $96C7 (dy). At +/-3 px/frame a waypoint leg takes ~30 frames (~0.5s), so the
+    // follower commits to a stale heading far too long and overshoots -- and the
+    // faster it walks, the further off-course it travels before re-aiming, which is
+    // exactly the left/right ping-pong seen at stairs.
+    //
+    // We widen that "arrived" threshold 16px -> 48px so the follower considers
+    // itself arrived (and recomputes direction) ~3x sooner, matching the 3x speed
+    // bump. Only each immediate's low byte changes ($96B6 / $96C8: $10 -> $30). The
+    // routine is follower-exclusive, so the --fast-follower build gate is enough; no
+    // runtime slot/flag gate is needed. See reverse-engineering-docs/town-movement.md.
+    if(options.fast_follower) {
+        bytes[0x0116B6] = static_cast<char>(0x50);  // $96B5 CMP #$0010 -> #$0030 (dx)
+        bytes[0x0116C8] = static_cast<char>(0x50);  // $96C7 CMP #$0010 -> #$0030 (dy)
+    }
 
     // Configurable sword (melee) reach. The player's attack hitbox builder
     // $01:B6BD reads the facing index $050A (only ever 0-3, confirmed via the

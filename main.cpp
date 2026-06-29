@@ -17,6 +17,7 @@ int main(int argc, const char** argv) {
     bool help{};
     bool fast_rom{};
     bool fade{};
+    bool fast_follower{};
     RandomizerOptions options;
     uint64_t seed{numeric_limits<uint64_t>::max()};
     // Parsed as int (Lyra treats uint8_t as a character), then narrowed below.
@@ -36,6 +37,8 @@ int main(int argc, const char** argv) {
                 ["--sword-reach"]("Melee sword reach in px per facing direction as right,down,left,up (each 1-128; vanilla 28,17,28,17)")
                | lyra::opt(fade)
                 ["--fade"]("Speed up the menu/transition fade-to-black (3 frames/step -> 1, ~3x faster)")
+               | lyra::opt(fast_follower)
+                ["--fast-follower"]("Improve the follower (Thor/Giles): walk at +/-3 px/frame (vs vanilla +/-1) and recompute its direction sooner (48px vs 16px waypoint threshold) so it keeps up without oscillating at chokepoints")
                | lyra::opt(fast_rom)
                 ["-f"]["--fast-rom"]("Experimental: convert to LoROM+FastROM (flag header, enable $420D, run boot, NMI and logged long-jumps from bank $80)");
 
@@ -60,6 +63,7 @@ int main(int argc, const char** argv) {
 
     options.walk_speed = static_cast<uint8_t>(std::clamp(walk_speed, 1, 15));
     options.fade = fade;
+    options.fast_follower = fast_follower;
     options.fast_rom = fast_rom;
 
     // --sword-reach "right,down,left,up": exactly four integers, each in [1,128].
